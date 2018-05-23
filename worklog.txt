@@ -1,0 +1,128 @@
+Work log:
+- fork https://github.com/jjg/busyapi and complete the setup tasks: clone, npm install, npm start
+
+- test out the landing page at http://localhost:3000/. Works fine.
+
+- test out the example curl command:
+  (curl -X POST -H "Content-Type: application/json" --data '{"patientId":"100","timestamp":"Tue Nov 01 2016 09:11:51 GMT-0500 (CDT)","medication":"Albuterol"}' http://localhost:3000/api/usages)
+  Looks good.
+
+- taking a look at the code, and doing some research on node, since I have only done a short tutorial previously
+  + package.json lists the dependencies on other projects, which I see are invoked via 'require' statements
+  + views folder contains .jade files, so that explains what the 'jade' package is.
+  + bin folder contains a www file, which is not a binary. Found a couple of online resources explaining this convention:
+    - https://stackoverflow.com/questions/23169941/what-does-bin-www-do-in-express-4-x
+    - https://github.com/expressjs/generator/issues/25
+  + looks like index.js and users.js won't come into play for the problem I'm working on, which leaves these files that I'm interested in:
+    - app.js
+    - bin/www
+    - routes/api/usages.js
+
+- Do some research to figure out a way to send 1M requests to my app.
+  + I found a program called 'hey' (https://github.com/rakyll/hey), which is marketed as an ApacheBench replacement, and uses golang
+  + Using the following 'hey' command, I can see how many requests 'busyapi' can respond to in a minute
+    ./hey -z 60s -c 20 -m POST -T "application/json" -d '{"patientId":"100","timestamp":"Tue Nov 01 2016 09:11:51 GMT-0500 (CDT)","medication":"Albuterol"}' http://localhost:3000/api/usages
+
+- initial 'hey' results without changes to 'busyapi':
+Summary:
+  Total:	60.0155 secs
+  Slowest:	0.1328 secs
+  Fastest:	0.0031 secs
+  Average:	0.0173 secs
+  Requests/sec:	1154.3690
+  Responses: 69280
+
+- That's quite a ways a way from 1M. The code in usages.js is not very complex, so I'm not sure what it will take to get it to 1M
+- My initial thought is to remove the logging and array storage to get a baseline for receiving and responding to a request
+- So I comment out everything in the app.post function in usages.js except the last line, which I change to: res.status(201).json({'id':1});
+- run 'hey' again, and get these results:
+Summary:
+  Total:	60.0139 secs
+  Slowest:	0.1371 secs
+  Fastest:	0.0011 secs
+  Average:	0.0166 secs
+  Requests/sec:	1201.6055
+  Responses: 72113
+
+- This is only a slight improvement. There is still some output being logged though, so I want to remove that in order to get my true baseline.
+- Do some research and discover that the 'morgan' package is likely what is doing that logging, so I comment it out of app.js
+- run 'hey' again, and get these results:
+Summary:
+  Total:	60.0145 secs
+  Slowest:	0.1137 secs
+  Fastest:	0.0068 secs
+  Average:	0.0092 secs
+  Requests/sec:	2163.0447
+  Responses: 129814
+
+- so we've almost doubled our number of responses from the initial try, but we're still a long ways away, and we've lost all our functionality
+- express is our web framework, so I search for express performance advice and find https://expressjs.com/en/advanced/best-practice-performance.html
+- that site has a number of suggestions, but I don't think most of those will help here:
++ Use gzip compression - we're not sending much back and forth here, and it's just on my computer, so this is probably not the biggest concern
++ Don’t use synchronous functions - this may be worth looking at, but since I'm hardly doing anything in the code now, this is probably not the first thing to look at
++ Do logging correctly - I've turned off logging completely now, so this isn't an issue at the moment
++ Handle exceptions properly - I'm not receiving any exceptions, so this doesn't apply for my purposes
++ Set NODE_ENV to “production” - Setting this flag would cache view templates and CSS files, and generate less verbose error messages, so these things don'g apply
++ Ensure your app automatically restarts - doesn't apply
++ Run your app in a cluster - This is worth trying.
++ Cache request results - we're just sending a canned result anyway, and we're supposed to be storing data, so I don't think this applies
++ Use a load balancer - could be useful at some level, but probably out of scope for this assessment
++ Use a reverse proxy - doesn't apply here
+
+- using node's 'cluster' module seems like the best bet. There are a number of tutorials about how to do this, including nodejs.org: https://nodejs.org/api/cluster.html
+- I implement rudimentary cluster functionality in bin/www, which, on my machine, yields 3 worker processes:
+Master process: 26612
+Worker process: 26613
+Worker process: 26614
+Worker process: 26615
+
+- I run 'hey' again, and get these results:
+Summary:
+  Total:	60.0048 secs
+  Slowest:	0.2033 secs
+  Fastest:	0.0009 secs
+  Average:	0.0059 secs
+  Requests/sec:	3408.2589
+  Responses: 204512
+
+- so that was a pretty big improvement, but still a ways away from 1M, and we still don't have any functionality
+- at this point, I don't think I'll be able to reach 1M requests.
+- not sure if I'm hitting a limitation on my machine, or if there is another big improvement I'm missing, but I'm going to do a few more things to experiment with what I can do in the usages.js code
+
+- i try wrapping res.status(201).json({'id':1}) inside of setImmediate, and get these results (looks like a slight improvement):
+Summary:
+  Total:	60.0094 secs
+  Slowest:	0.1608 secs
+  Fastest:	0.0011 secs
+  Average:	0.0056 secs
+  Requests/sec:	3547.0587
+  Responses: 212857
+
+- I add back the array storage, and get these results:
+Summary:
+  Total:	60.0056 secs
+  Slowest:	0.1376 secs
+  Fastest:	0.0008 secs
+  Average:	0.0061 secs
+  Requests/sec:	3300.9583
+  Responses: 198076
+
+- so there is definitely a degradation when saving to the array
+- as an experiment, instead of pushing to an array, I try incrementing a numeric variable and using that to save to unique nodes of an object
+- I try running again, and that does seem to be a slight improvement:
+Summary:
+  Total:	60.0064 secs
+  Slowest:	0.1310 secs
+  Fastest:	0.0011 secs
+  Average:	0.0059 secs
+  Requests/sec:	3368.8082
+  Responses: 202150
+
+- ultimately, though, now that we are using clusters, we have another problem, which is that our request bodies are now being saved to three distinct processes
+- The expressjs performance recommendations I found mentioned that we could use Redis to store our data across processes, so I would likely explore that if I had more time.
+
+In the end, I was not able to reach 1M requests in a minute. I'm not sure if this is a limitation of my machine or if there are other things I could do with express or my setup to make it run faster.
+
+My next step would likely be to make an even more rudimentary node server without express and see if I can rule out my machine as an issue.
+
+Generally speaking, I think the things that most easily could improve performance would be to use a machine with more processors, and to find ways to save our data and keep status logs in ways that can be handled asynchronously, by handing work off to a database or filesystem in order to free up the node threads.
